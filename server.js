@@ -1,11 +1,8 @@
 /**
- * PodCamp WebRTC Signaling Server
- * Deploy auf Railway: https://railway.app (kostenlos)
- *
+ * PodCamp Signaling Server
+ * Deploy: Railway / Render / jeder Node.js Host
  * npm install express socket.io cors
- * node server.js
  */
-
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
@@ -13,106 +10,95 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
-
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
-  transports: ['websocket', 'polling']
+const http = createServer(app);
+const io = new Server(http, {
+  cors: { origin: '*', methods: ['GET','POST'] },
+  transports: ['websocket','polling'],
+  pingTimeout: 20000,
+  pingInterval: 10000
 });
 
-// Raum → Set von Socket-IDs
-const rooms = {};
+// roomId → Map(socketId → userInfo)
+const rooms = new Map();
 
-app.get('/', (req, res) => res.json({ status: 'PodCamp Signaling Server online' }));
+app.get('/', (req, res) => res.json({ status: 'PodCamp Signaling Server online', rooms: rooms.size }));
 
 io.on('connection', socket => {
-  console.log(`[+] ${socket.id} verbunden`);
+  console.log(`[+] ${socket.id}`);
 
-  // Raum beitreten
-  socket.on('join-room', ({ roomId, userId, username, color }) => {
-    socket.roomId = roomId;
-    socket.userId = userId;
+  // ── Raum beitreten ──────────────────────────────────────────
+  socket.on('join', ({ roomId, userId, username, color }) => {
+    socket.roomId   = roomId;
+    socket.userId   = userId;
     socket.username = username;
-    socket.color = color || '#6ac46a';
+    socket.color    = color || '#6ac46a';
 
-    if (!rooms[roomId]) rooms[roomId] = {};
-    rooms[roomId][socket.id] = { userId, username, color, socketId: socket.id };
+    if (!rooms.has(roomId)) rooms.set(roomId, new Map());
+    const room = rooms.get(roomId);
 
+    // Allen anderen: neuer User
+    // Aber ZUERST dem neuen User sagen wer schon da ist
+    const existing = [];
+    room.forEach((info, sid) => {
+      existing.push({ socketId: sid, userId: info.userId, username: info.username, color: info.color });
+    });
+
+    // Neuen User in den Raum eintragen
+    room.set(socket.id, { userId, username, color });
     socket.join(roomId);
 
-    // Allen anderen im Raum sagen: jemand neues ist da
+    // Neuer User bekommt Liste der Bestehenden
+    socket.emit('room-users', existing);
+
+    // Bestehende bekommen Notification
     socket.to(roomId).emit('user-joined', {
-      socketId: socket.id,
-      userId,
-      username,
-      color
+      socketId: socket.id, userId, username, color
     });
 
-    // Dem neuen Nutzer: wer ist schon da?
-    socket.emit('room-users', Object.values(rooms[roomId]).filter(u => u.socketId !== socket.id));
-
-    console.log(`[Room ${roomId}] ${username} joined. Total: ${Object.keys(rooms[roomId]).length}`);
+    console.log(`[Room ${roomId}] ${username} joined. Total: ${room.size}`);
   });
 
-  // WebRTC Offer (von Anrufer an Angerufenen)
-  socket.on('webrtc-offer', ({ targetSocketId, offer, fromUserId, fromUsername }) => {
-    io.to(targetSocketId).emit('webrtc-offer', {
-      offer,
-      fromSocketId: socket.id,
-      fromUserId,
-      fromUsername
-    });
+  // ── WebRTC Signaling ────────────────────────────────────────
+  socket.on('offer', ({ to, offer }) => {
+    io.to(to).emit('offer', { from: socket.id, offer });
   });
 
-  // WebRTC Answer (vom Angerufenen zurück)
-  socket.on('webrtc-answer', ({ targetSocketId, answer }) => {
-    io.to(targetSocketId).emit('webrtc-answer', {
-      answer,
-      fromSocketId: socket.id
+  socket.on('answer', ({ to, answer }) => {
+    io.to(to).emit('answer', { from: socket.id, answer });
+  });
+
+  socket.on('ice', ({ to, candidate }) => {
+    io.to(to).emit('ice', { from: socket.id, candidate });
+  });
+
+  // ── Chat ────────────────────────────────────────────────────
+  socket.on('chat', ({ roomId, username, color, text, time }) => {
+    // An alle im Raum (inkl. Sender — Client filtert selbst)
+    io.to(roomId).emit('chat', {
+      socketId: socket.id, username, color, text, time
     });
   });
 
-  // ICE Candidates austauschen
-  socket.on('ice-candidate', ({ targetSocketId, candidate }) => {
-    io.to(targetSocketId).emit('ice-candidate', {
-      candidate,
-      fromSocketId: socket.id
-    });
-  });
+  // ── Raum verlassen ──────────────────────────────────────────
+  function leaveRoom() {
+    const roomId = socket.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (room) {
+      room.delete(socket.id);
+      if (room.size === 0) rooms.delete(roomId);
+    }
+    socket.to(roomId).emit('user-left', { socketId: socket.id });
+    socket.leave(roomId);
+    console.log(`[-] ${socket.username} left ${roomId}`);
+  }
 
-  // Chat
-  socket.on('chat-message', ({ roomId, text, username, color }) => {
-    io.to(roomId).emit('chat-message', {
-      socketId: socket.id,
-      username,
-      color,
-      text,
-      time: new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
-    });
-  });
-
-  // Raum verlassen / Verbindung getrennt
+  socket.on('leave', leaveRoom);
   socket.on('disconnect', () => {
-    const roomId = socket.roomId;
-    if (roomId && rooms[roomId]) {
-      delete rooms[roomId][socket.id];
-      if (Object.keys(rooms[roomId]).length === 0) delete rooms[roomId];
-      socket.to(roomId).emit('user-left', { socketId: socket.id, userId: socket.userId });
-      console.log(`[-] ${socket.username || socket.id} left room ${roomId}`);
-    }
+    leaveRoom();
     console.log(`[-] ${socket.id} disconnected`);
-  });
-
-  socket.on('leave-room', () => {
-    const roomId = socket.roomId;
-    if (roomId && rooms[roomId]) {
-      delete rooms[roomId][socket.id];
-      socket.to(roomId).emit('user-left', { socketId: socket.id, userId: socket.userId });
-      socket.leave(roomId);
-    }
   });
 });
 
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => console.log(`✅ Signaling Server läuft auf Port ${PORT}`));
+http.listen(PORT, () => console.log(`✅ PodCamp Signaling läuft auf Port ${PORT}`));
