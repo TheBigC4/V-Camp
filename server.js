@@ -87,8 +87,6 @@ io.on('connection', (socket) => {
   });
 
   // ==================== MODERATION ====================
-  // Diese Events werden vom Admin/Moderator gesendet
-
   // Mute (nur Event, keine Trennung)
   socket.on('mute', ({ roomId, targetSocketId }) => {
     io.to(targetSocketId).emit('forceMute');
@@ -96,14 +94,10 @@ io.on('connection', (socket) => {
 
   // Kick – Ziel wird sofort getrennt und erhält Nachricht
   socket.on('kick', ({ roomId, targetSocketId, reason }) => {
-    // Nachricht an den Ziel-Client senden
     io.to(targetSocketId).emit('kicked', { reason });
-    // Ziel-Socket trennen (er wird aus dem Raum geworfen)
     const targetSocket = io.sockets.sockets.get(targetSocketId);
     if (targetSocket) {
-      // Aus dem Raum entfernen (lokal)
       leaveRoom(targetSocket);
-      // Verbindung schließen
       targetSocket.disconnect(true);
     }
   });
@@ -132,5 +126,13 @@ io.on('connection', (socket) => {
   });
 });
 
+app.get('/', (req, res) => {
+  res.json({
+    status: 'PodCamp Signaling Server online',
+    rooms: rooms.size,
+    timestamp: new Date().toISOString()
+  });
+});
+
 const PORT = process.env.PORT || 3001;
-http.listen(PORT, () => console.log(`✅ PodCamp Signaling läuft auf Port ${PORT}`));
+http.listen(PORT, () => console.log(`✅ PodCamp Signaling Server läuft auf Port ${PORT}`));
