@@ -4,19 +4,26 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
+
+// Erhöhe die maximale JSON-Payload-Größe (für Express)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 app.use(cors());
+
 const http = createServer(app);
 const io = new Server(http, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
   transports: ['websocket', 'polling'],
   pingTimeout: 30000,
-  pingInterval: 25000
+  pingInterval: 25000,
+  // Erhöhe die maximale Nachrichtengröße für Socket.io (Standard 1 MB)
+  maxHttpBufferSize: 50 * 1024 * 1024 // 50 MB
 });
 
-// Raum-Verwaltung: roomId → Map(socketId → userInfo)
+// Raum-Verwaltung
 const rooms = new Map();
 
-// Hilfsfunktion zum Verlassen eines Raums
 function leaveRoom(socket) {
   const roomId = socket.roomId;
   if (!roomId) return;
@@ -32,7 +39,6 @@ function leaveRoom(socket) {
 io.on('connection', (socket) => {
   console.log('[+] Neu verbunden:', socket.id);
 
-  // ---- Beitritt zu einem Raum ----
   socket.on('join', ({ roomId, userId, username, color, avatar, podcast_url, role }) => {
     socket.roomId = roomId;
     socket.userId = userId;
@@ -45,7 +51,6 @@ io.on('connection', (socket) => {
     if (!rooms.has(roomId)) rooms.set(roomId, new Map());
     const room = rooms.get(roomId);
 
-    // Bestehende Teilnehmer an den Neuen senden
     const existing = [];
     room.forEach((info, sid) => {
       existing.push({
@@ -59,14 +64,12 @@ io.on('connection', (socket) => {
     });
     socket.emit('room-users', existing);
 
-    // Neuen Teilnehmer eintragen
     room.set(socket.id, {
       userId, username, color: socket.color,
       avatar: socket.avatar, podcast_url: socket.podcast_url
     });
     socket.join(roomId);
 
-    // Andere informieren
     socket.to(roomId).emit('user-joined', {
       socketId: socket.id,
       userId, username,
@@ -76,32 +79,19 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ---- WebRTC Signaling ----
-  socket.on('offer', ({ to, offer }) => {
-    io.to(to).emit('offer', { from: socket.id, offer });
-  });
-  socket.on('answer', ({ to, answer }) => {
-    io.to(to).emit('answer', { from: socket.id, answer });
-  });
-  socket.on('ice', ({ to, candidate }) => {
-    io.to(to).emit('ice', { from: socket.id, candidate });
-  });
+  socket.on('offer', ({ to, offer }) => io.to(to).emit('offer', { from: socket.id, offer }));
+  socket.on('answer', ({ to, answer }) => io.to(to).emit('answer', { from: socket.id, answer }));
+  socket.on('ice', ({ to, candidate }) => io.to(to).emit('ice', { from: socket.id, candidate }));
 
-  // ---- Chat ----
   socket.on('chat', ({ roomId, username, color, text, time, userId }) => {
-    io.to(roomId).emit('chat', {
-      socketId: socket.id,
-      username, color, text, time, userId
-    });
+    io.to(roomId).emit('chat', { socketId: socket.id, username, color, text, time, userId });
   });
 
-  // ==================== MODERATION ====================
-  // Mute (nur Event, keine Trennung)
+  // Moderations-Events
   socket.on('mute', ({ roomId, targetSocketId }) => {
     io.to(targetSocketId).emit('forceMute');
   });
 
-  // Kick – Ziel wird sofort getrennt und erhält Nachricht
   socket.on('kick', ({ roomId, targetSocketId, reason }) => {
     io.to(targetSocketId).emit('kicked', { reason });
     const targetSocket = io.sockets.sockets.get(targetSocketId);
@@ -111,7 +101,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Ban – wie Kick, plus Client wird über Ban informiert
   socket.on('ban', ({ roomId, userId, targetSocketId, reason, moderatorId }) => {
     io.to(targetSocketId).emit('banned', { reason });
     const targetSocket = io.sockets.sockets.get(targetSocketId);
@@ -119,15 +108,12 @@ io.on('connection', (socket) => {
       leaveRoom(targetSocket);
       targetSocket.disconnect(true);
     }
-    // Hinweis: Der Eintrag in der Datenbank (IP-Sperre) erfolgt bereits im Client
   });
 
-  // Raum-Moderator ernennen (nur Event)
   socket.on('moderator-appointed', ({ roomId, userId, username, appointedBy }) => {
     socket.to(roomId).emit('moderator-appointed', { userId, username });
   });
 
-  // ---- Verlassen & Trennen ----
   socket.on('leave', () => leaveRoom(socket));
   socket.on('disconnect', () => {
     leaveRoom(socket);
@@ -135,7 +121,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// Einfacher Health-Check
 app.get('/', (req, res) => {
   res.json({
     status: 'PodCamp Signaling Server online',
