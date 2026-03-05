@@ -2,26 +2,9 @@ const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 
 const app = express();
-
-// ==================== SICHERHEIT & RATE LIMITING ====================
-app.use(helmet()); // Setzt wichtige Security-Header
-app.use(cors({
-  origin: '*', // In Produktion auf deine Domain beschränken!
-  methods: ['GET', 'POST']
-}));
-
-// Rate-Limiting: maximal 100 Anfragen pro 15 Minuten pro IP
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 Minuten
-  max: 100,
-  message: 'Zu viele Anfragen, bitte später erneut versuchen.'
-});
-app.use(limiter);
-
+app.use(cors());
 const http = createServer(app);
 const io = new Server(http, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
@@ -104,6 +87,8 @@ io.on('connection', (socket) => {
   });
 
   // ==================== MODERATION ====================
+  // Diese Events werden vom Admin/Moderator gesendet
+
   // Mute (nur Event, keine Trennung)
   socket.on('mute', ({ roomId, targetSocketId }) => {
     io.to(targetSocketId).emit('forceMute');
@@ -111,10 +96,14 @@ io.on('connection', (socket) => {
 
   // Kick – Ziel wird sofort getrennt und erhält Nachricht
   socket.on('kick', ({ roomId, targetSocketId, reason }) => {
+    // Nachricht an den Ziel-Client senden
     io.to(targetSocketId).emit('kicked', { reason });
+    // Ziel-Socket trennen (er wird aus dem Raum geworfen)
     const targetSocket = io.sockets.sockets.get(targetSocketId);
     if (targetSocket) {
+      // Aus dem Raum entfernen (lokal)
       leaveRoom(targetSocket);
+      // Verbindung schließen
       targetSocket.disconnect(true);
     }
   });
@@ -143,16 +132,5 @@ io.on('connection', (socket) => {
   });
 });
 
-app.get('/', (req, res) => {
-  res.json({
-    status: 'PodCamp Signaling Server online',
-    rooms: rooms.size,
-    timestamp: new Date().toISOString()
-  });
-});
-
 const PORT = process.env.PORT || 3001;
-http.listen(PORT, () => {
-  console.log(`✅ PodCamp Signaling Server läuft auf Port ${PORT}`);
-  console.log('🔒 Sicherheitsfeatures aktiv: Helmet, Rate-Limiting');
-});
+http.listen(PORT, () => console.log(`✅ PodCamp Signaling läuft auf Port ${PORT}`));
